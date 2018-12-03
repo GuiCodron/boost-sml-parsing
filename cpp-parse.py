@@ -4,6 +4,8 @@ import os
 from pprint import pprint
 import sys
 
+import clang
+
 from clang.cindex import CompilationDatabase, Config, TranslationUnit, CursorKind
 Config.set_library_path("/usr/lib/llvm-6.0/lib")
 
@@ -24,12 +26,13 @@ def get_include_dirs(filename, compdb):
     include_paths = []
 
     next_is_include = False
-
+    include_cmds = []
     for i in range(len(cmds)):
         for arg in cmds[i].arguments:
             if not next_is_include:
                 if arg in include_opts:
                     next_is_include = True
+                    include_cmds+=[arg]
                     continue
                 for opt in include_opts:
                     if arg.startswith(opt):
@@ -37,11 +40,13 @@ def get_include_dirs(filename, compdb):
                         if start > 2:
                             start += 1
                         include_paths.append(arg[start:])
+                        include_cmds+=[arg]
                         break
                 continue
+            include_cmds+=[arg]
             include_paths.append(arg)
             next_is_include = False
-    return include_paths
+    return include_cmds
 
 
 def get_all_includes(filename, compdb):
@@ -134,6 +139,7 @@ def rec_spelling(node, d=None):
         d["lambda_decl"] = {}
     else:
         node_name = node.spelling
+        print(node.spelling, node.displayname)
         # while node_name in d:
         #     node_name += " " + node.spelling
 
@@ -307,14 +313,17 @@ def parse_transition(node):
         transition_repr += " --> " + target_ret[1]
 
     event_ret = get_event(node)
-    if event_ret is not None:
-        transition_repr += " : " + event_ret
-
     guard_ret = get_guard(node)
+    action_ret = get_action(node)
+
+    if event_ret or action_ret or guard_ret:
+        transition_repr += " :"
+    if event_ret is not None:
+        transition_repr += " " + event_ret
+
     if guard_ret:
         transition_repr += " [" + guard_ret + "]"
 
-    action_ret = get_action(node)
     if action_ret:
         transition_repr += " / " + action_ret
     return transition_repr, state_refs
@@ -329,14 +338,14 @@ def get_transitions(node, transition_store=[]):
     return transition_store
 
 
-def parse_transition_table(node):
+def parse_transition_table(node, namespaces_prefix):
     transitions = []
     transitions = get_transitions(node, transitions)
     state_refs = []
 
     transition_table_repr = ""
     for transition in transitions:
-        node = NodeRepr(rec_spelling(transition))
+        node = NodeRepr(rec_spelling(transition), namespaces_prefix)
 
         parsed_transition, transition_state_refs = parse_transition(node)
         if parsed_transition is not None:
@@ -346,11 +355,13 @@ def parse_transition_table(node):
     return transition_table_repr, set(state_refs)
 
 class NodeRepr():
-    def __init__(self, source_node):
+    def __init__(self, source_node, namespaces_prefix):
         name, childs = next(iter(source_node.items()))
+        for namespace in namespaces_prefix:
+            name = name.replace(namespace, '')
         self.node = source_node
         self.name = name
-        self.c = [NodeRepr(c) for c in childs]
+        self.c = [NodeRepr(c, namespaces_prefix) for c in childs]
 
     def __repr__(self):
         return {self.name: self.c}.__repr__()
@@ -375,21 +386,40 @@ def sm_search(node):
     return len(rec_search(node, transition_search, [], transition_tables=[])) != 0
 
 
+
+def get_diag_info(diag):
+    return { 'severity' : diag.severity,
+             'location' : diag.location,
+             'spelling' : diag.spelling,
+             'ranges' : diag.ranges,
+             'fixits' : diag.fixits }
+
 def main():
 
     compile_commands_file = sys.argv[1]
     cpp_file = sys.argv[2]
+    namespaces_prefix = sys.argv[3].split(',')
+    namespaces_prefix.sort(key =lambda x: -len(x))
+    print(namespaces_prefix)
 
     compilationDB = CompilationDatabase.fromDirectory(
         os.path.dirname(compile_commands_file))
+    compilation_arguments = [str(i) for i in compilationDB.getCompileCommands(cpp_file)[0].arguments]
+    # print(compilation_arguments)
+    # tu = get_tu(cpp_file, compilationDB)
+    index = clang.cindex.Index.create()
 
-    tu = get_tu(cpp_file, compilationDB)
-
+    # print(compilation_arguments)
+    # print(get_include_dirs(cpp_file, compilationDB))
+    tu = index.parse(cpp_file, get_include_dirs(cpp_file, compilationDB))
+    for diag in tu.diagnostics:
+        print(get_diag_info(diag))
+    pprint(('diags', map(get_diag_info, tu.diagnostics)))
     sm_bases = []
-    rec_search(tu.cursor, sm_search, [cpp_file], transition_tables=sm_bases)
+    rec_search(tu.cursor, sm_search, [], transition_tables=sm_bases)
 
     transition_tables = []
-    rec_search(tu.cursor, transition_search, [cpp_file], transition_tables=transition_tables)
+    rec_search(tu.cursor, transition_search, [], transition_tables=transition_tables)
 
     def get_sm(sm_list, sm_name):
         return [e for e in sm_list if e[0].spelling == sm_name][0]
@@ -397,12 +427,13 @@ def main():
     state_machines = []
     state_machines_graph = {}
     for sm_base in sm_bases:
-        tt = rec_search(sm_base, transition_search, max_depth=6, transition_tables=[])[0]
-        tt_repr, tt_refs = parse_transition_table(tt)
+        tt = rec_search(sm_base, transition_search, transition_tables=[])[0]
+        tt_repr, tt_refs = parse_transition_table(tt, namespaces_prefix)
         state_machines.append([sm_base, tt_repr, tt_refs])
         state_machines_graph[sm_base.spelling] = tt_refs
 
     graph_view = list(toposort(state_machines_graph))
+
     graph_view = graph_view[1:]
     for sm_names in graph_view:
         for sm_name in sm_names:
