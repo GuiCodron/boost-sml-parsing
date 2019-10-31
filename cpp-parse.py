@@ -1,4 +1,6 @@
+from __future__ import print_function
 
+from toposort import toposort, toposort_flatten
 import re
 import os
 from pprint import pprint
@@ -9,7 +11,12 @@ import clang
 from clang.cindex import CompilationDatabase, Config, TranslationUnit, CursorKind
 Config.set_library_path("/usr/lib/llvm-6.0/lib")
 
-from toposort import toposort, toposort_flatten
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def epprint(*args, **kwargs):
+    pprint(*args, stream=sys.stderr, **kwargs)
 
 
 def get_tu(filename, compdb):
@@ -19,34 +26,40 @@ def get_tu(filename, compdb):
     return tu
 
 
-def get_include_dirs(filename, compdb):
+def get_compilation_args(filename, compdb):
     cmds = compdb.getCompileCommands(filename)
-    include_opts = ['-I', '-isystem',
-                    '-internal-isystem', '-internal-externc-isystem']
-    include_paths = []
+    include_opts = ['-I', '-isystem', '-D',
+                    '-internal-isystem', '-internal-externc-isystem', '--sysroot', '-std'
+                    ]
 
     next_is_include = False
-    include_cmds = []
+    cmpilation_args = [
+        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/../../../../arm-linux-gnueabihf/include/c++/5.2.1',
+        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/../../../../arm-linux-gnueabihf/include/c++/5.2.1/arm-linux-gnueabihf/.',
+        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/../../../../arm-linux-gnueabihf/include/c++/5.2.1/backward',
+        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/include',
+        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/include-fixed',
+        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/../../../../arm-linux-gnueabihf/include',
+        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../arm-linux-gnueabihf/libc/usr/include',
+        '-D__ARM_PCS_VFP'
+
+    ]
+
     for i in range(len(cmds)):
         for arg in cmds[i].arguments:
             if not next_is_include:
                 if arg in include_opts:
                     next_is_include = True
-                    include_cmds+=[arg]
+                    cmpilation_args += [arg]
                     continue
                 for opt in include_opts:
                     if arg.startswith(opt):
-                        start = len(opt)
-                        if start > 2:
-                            start += 1
-                        include_paths.append(arg[start:])
-                        include_cmds+=[arg]
+                        cmpilation_args += [arg]
                         break
                 continue
-            include_cmds+=[arg]
-            include_paths.append(arg)
+            cmpilation_args += [arg]
             next_is_include = False
-    return include_cmds
+    return cmpilation_args
 
 
 def get_all_includes(filename, compdb):
@@ -55,14 +68,6 @@ def get_all_includes(filename, compdb):
     for inc in tu.get_includes():
         includes.add(inc.include.name)
     return includes
-
-
-def get_diag_info(diag):
-    return {'severity': diag.severity,
-            'location': diag.location,
-            'spelling': diag.spelling,
-            'ranges': diag.ranges,
-            'fixits': diag.fixits}
 
 
 def get_cursor_id(cursor, showIDS=False, cursor_list=[]):
@@ -94,7 +99,7 @@ def get_info(node, maxDepth=None, depth=0):
         return "lambda_decl"
     d = {'kind': node.kind,
          'spelling': node.spelling,
-        #  'type' : node.type.spelling,
+         #  'type' : node.type.spelling,
          'xchildren': children}
     if node.spelling == 'state':
         d["type"] = node.type.spelling
@@ -113,7 +118,7 @@ def get_info(node, maxDepth=None, depth=0):
     return d
 
 
-def rec_search(node, s_fun, files=[], max_depth=None, depth=0, transition_tables = []):
+def rec_search(node, s_fun, files=[], max_depth=None, depth=0, transition_tables=[]):
     if max_depth is not None and depth >= max_depth:
         return
     if len(files) > 0 and node.location.file is not None and str(node.location.file) not in files:
@@ -139,18 +144,14 @@ def rec_spelling(node, d=None):
         d["lambda_decl"] = {}
     else:
         node_name = node.spelling
-        print(node.spelling, node.displayname)
-        # while node_name in d:
-        #     node_name += " " + node.spelling
 
-        d[node_name] = [] #{"c": node, "child":[]}
+        d[node_name] = []
         for child in node.get_children():
             child_dict = {}
             d[node_name].append(child_dict)
             rec_spelling(child, child_dict)
 
     return d
-
 
 
 def bfs(func, to_process=[]):
@@ -179,6 +180,8 @@ def get_state_name(node, is_initial=False):
         return (is_initial, "[*]")
     if node.name == "state":
         return (is_initial, rep_struct(node.c[0].name))
+    if len(node.c) == 0:
+        return (is_initial, rep_struct(node.name))
     return get_state_name(node.c[0], is_initial)
 
 
@@ -257,12 +260,14 @@ def get_guard(transition):
             return parse_guard(node.c[0]) + " && " + parse_guard(node.c[2])
         if node.name == "operator||":
             return parse_guard(node.c[0]) + " || " + parse_guard(node.c[2])
+        if node.name == "operator()" and node.c[0].name == "call":
+            return parse_guard(node.c[2])
         if node.name == "":
             return "(" + parse_guard(node.c[0]) + ")"
         if len(node.c) == 0:
             return node.name
-
-        raise "Action parsing error"
+        print(node)
+        raise Exception("Action parsing error: " + node)
 
     return parse_guard(guard_node)
 
@@ -283,11 +288,13 @@ def get_action(transition):
     def parse_action(node):
         if node.name == "operator,":
             return parse_action(node.c[0]) + ", " + parse_action(node.c[2])
+        if node.name == "operator()" and node.c[0].name == "call":
+            return parse_action(node.c[2])
         if node.name == "":
             return "(" + parse_action(node.c[0]) + ")"
         if len(node.c) == 0:
             return node.name
-        raise "Action parsing error"
+        raise Exception("Action parsing error")
 
     return parse_action(action_node)
 
@@ -354,6 +361,7 @@ def parse_transition_table(node, namespaces_prefix):
 
     return transition_table_repr, set(state_refs)
 
+
 class NodeRepr():
     def __init__(self, source_node, namespaces_prefix):
         name, childs = next(iter(source_node.items()))
@@ -365,6 +373,7 @@ class NodeRepr():
 
     def __repr__(self):
         return {self.name: self.c}.__repr__()
+
 
 def regex_search(pattern):
     def f(node):
@@ -379,47 +388,44 @@ def transition_search(node):
 def sm_search(node):
     if node.kind != CursorKind.STRUCT_DECL:
         return False
-    sm_creation = [n for n in node.get_children() if n.displayname == 'operator()()']
+    sm_creation = [n for n in node.get_children() if n.displayname ==
+                   'operator()()']
     if len(sm_creation) == 0:
         return False
 
     return len(rec_search(node, transition_search, [], transition_tables=[])) != 0
 
 
-
 def get_diag_info(diag):
-    return { 'severity' : diag.severity,
-             'location' : diag.location,
-             'spelling' : diag.spelling,
-             'ranges' : diag.ranges,
-             'fixits' : diag.fixits }
+    return {'severity': diag.severity,
+            'location': diag.location,
+            'spelling': diag.spelling,
+            'ranges': diag.ranges,
+            'fixits': diag.fixits}
+
 
 def main():
 
     compile_commands_file = sys.argv[1]
     cpp_file = sys.argv[2]
     namespaces_prefix = sys.argv[3].split(',')
-    namespaces_prefix.sort(key =lambda x: -len(x))
-    print(namespaces_prefix)
+    namespaces_prefix.sort(key=lambda x: -len(x))
 
     compilationDB = CompilationDatabase.fromDirectory(
         os.path.dirname(compile_commands_file))
-    compilation_arguments = [str(i) for i in compilationDB.getCompileCommands(cpp_file)[0].arguments]
-    # print(compilation_arguments)
-    # tu = get_tu(cpp_file, compilationDB)
     index = clang.cindex.Index.create()
 
-    # print(compilation_arguments)
-    # print(get_include_dirs(cpp_file, compilationDB))
-    tu = index.parse(cpp_file, get_include_dirs(cpp_file, compilationDB))
+    tu = index.parse(cpp_file, get_compilation_args(cpp_file, compilationDB))
+
     for diag in tu.diagnostics:
-        print(get_diag_info(diag))
-    pprint(('diags', map(get_diag_info, tu.diagnostics)))
+        epprint(get_diag_info(diag))
+
     sm_bases = []
     rec_search(tu.cursor, sm_search, [], transition_tables=sm_bases)
 
     transition_tables = []
-    rec_search(tu.cursor, transition_search, [], transition_tables=transition_tables)
+    rec_search(tu.cursor, transition_search, [],
+               transition_tables=transition_tables)
 
     def get_sm(sm_list, sm_name):
         return [e for e in sm_list if e[0].spelling == sm_name][0]
@@ -446,8 +452,12 @@ def main():
                     new_repr += "\t" + line + "\n"
                 new_repr += "}\n"
             sm[1] = new_repr + sm[1]
+
+    print("@startuml")
     for sm_name in graph_view[-1]:
         sm = get_sm(state_machines, sm_name)
         print(sm[1])
+    print("@enduml")
+
 
 main()
