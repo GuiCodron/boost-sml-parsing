@@ -3,20 +3,12 @@ from __future__ import print_function
 from toposort import toposort, toposort_flatten
 import re
 import os
-from pprint import pprint
 import sys
-
+import argparse
 import clang
 
 from clang.cindex import CompilationDatabase, Config, TranslationUnit, CursorKind
 Config.set_library_path("/usr/lib/llvm-6.0/lib")
-
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
-
-
-def epprint(*args, **kwargs):
-    pprint(*args, stream=sys.stderr, **kwargs)
 
 
 def get_tu(filename, compdb):
@@ -28,38 +20,30 @@ def get_tu(filename, compdb):
 
 def get_compilation_args(filename, compdb):
     cmds = compdb.getCompileCommands(filename)
+    if cmds is None:
+        return None
     include_opts = ['-I', '-isystem', '-D',
                     '-internal-isystem', '-internal-externc-isystem', '--sysroot', '-std'
                     ]
 
     next_is_include = False
-    cmpilation_args = [
-        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/../../../../arm-linux-gnueabihf/include/c++/5.2.1',
-        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/../../../../arm-linux-gnueabihf/include/c++/5.2.1/arm-linux-gnueabihf/.',
-        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/../../../../arm-linux-gnueabihf/include/c++/5.2.1/backward',
-        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/include',
-        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/include-fixed',
-        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../lib/gcc/arm-linux-gnueabihf/5.2.1/../../../../arm-linux-gnueabihf/include',
-        '-I/home/gcodron/work/camera/build/toolchain/linaro_toolchain/linaro-armv7ahf-2015.11-gcc5.2/bin/../arm-linux-gnueabihf/libc/usr/include',
-        '-D__ARM_PCS_VFP'
-
-    ]
+    compilation_args : list= []
 
     for i in range(len(cmds)):
         for arg in cmds[i].arguments:
             if not next_is_include:
                 if arg in include_opts:
                     next_is_include = True
-                    cmpilation_args += [arg]
+                    compilation_args += [arg]
                     continue
                 for opt in include_opts:
                     if arg.startswith(opt):
-                        cmpilation_args += [arg]
+                        compilation_args += [arg]
                         break
                 continue
-            cmpilation_args += [arg]
+            compilation_args += [arg]
             next_is_include = False
-    return cmpilation_args
+    return compilation_args
 
 
 def get_all_includes(filename, compdb):
@@ -292,9 +276,9 @@ def get_action(transition):
             return parse_action(node.c[2])
         if node.name == "":
             return "(" + parse_action(node.c[0]) + ")"
-        if len(node.c) == 0:
-            return node.name
-        raise Exception("Action parsing error")
+        return node.name
+        # if len(node.c) == 0:
+        # raise Exception("Action parsing error", node, node.node)
 
     return parse_action(action_node)
 
@@ -367,6 +351,7 @@ class NodeRepr():
         name, childs = next(iter(source_node.items()))
         for namespace in namespaces_prefix:
             name = name.replace(namespace, '')
+        name = name.replace("::", '_')
         self.node = source_node
         self.name = name
         self.c = [NodeRepr(c, namespaces_prefix) for c in childs]
@@ -415,7 +400,13 @@ def main():
         os.path.dirname(compile_commands_file))
     index = clang.cindex.Index.create()
 
-    tu = index.parse(cpp_file, get_compilation_args(cpp_file, compilationDB))
+    compile_args = get_compilation_args(cpp_file, compilationDB)
+    if compile_args is None:
+        print(f"No compile command for file: {cpp_file}")
+
+    # print(' '.join(list(compile_args[0].arguments)[1:]))
+
+    tu = index.parse(cpp_file, compile_args)
 
     for diag in tu.diagnostics:
         epprint(get_diag_info(diag))
@@ -423,9 +414,18 @@ def main():
     sm_bases = []
     rec_search(tu.cursor, sm_search, [], transition_tables=sm_bases)
 
-    transition_tables = []
-    rec_search(tu.cursor, transition_search, [],
-               transition_tables=transition_tables)
+    type_map = {}
+    def get_hash_list(node):
+        if node.is_definition() and node.kind == CursorKind.STRUCT_DECL:
+            type_map[node.type.spelling] = get_info(node)
+        return False
+
+    rec_search(tu.cursor, get_hash_list, [], transition_tables=[])
+    pprint(type_map)
+    exit(1)
+    # transition_tables = []
+    # rec_search(tu.cursor, transition_search, [],
+    #            transition_tables=transition_tables)
 
     def get_sm(sm_list, sm_name):
         return [e for e in sm_list if e[0].spelling == sm_name][0]
@@ -434,11 +434,15 @@ def main():
     state_machines_graph = {}
     for sm_base in sm_bases:
         tt = rec_search(sm_base, transition_search, transition_tables=[])[0]
+        print(tt)
         tt_repr, tt_refs = parse_transition_table(tt, namespaces_prefix)
+        print(sm_base, tt_repr, tt_refs)
         state_machines.append([sm_base, tt_repr, tt_refs])
         state_machines_graph[sm_base.spelling] = tt_refs
 
+
     graph_view = list(toposort(state_machines_graph))
+    print(graph_view)
 
     graph_view = graph_view[1:]
     for sm_names in graph_view:
