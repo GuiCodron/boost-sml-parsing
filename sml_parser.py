@@ -3,11 +3,12 @@ import re
 import os
 from pprint import pprint
 import sys
+import subprocess
 
 import clang
 
 from clang.cindex import CompilationDatabase, Config, TranslationUnit, CursorKind
-Config.set_library_path("/usr/lib/llvm-6.0/lib")
+# Config.set_library_path("/usr/lib/llvm-6.0/lib")
 
 from toposort import toposort, toposort_flatten
 
@@ -20,7 +21,13 @@ def get_tu(filename, compdb):
 
 
 def get_include_dirs(filename, compdb):
-    cmds = compdb.getCompileCommands(filename)
+    raw_cmds = compdb.getCompileCommands(filename)
+    cmds = [raw_cmds[i] for i in len(raw_cmds)]
+    print(cmds)
+    cmd_out = subprocess.check_output(cmds + ['-Wp,-v', '-x', 'c++', '-fsyntax-only', '-o', '/dev/null'])
+    print(cmd_out)
+
+    return
     include_opts = ['-I', '-isystem',
                     '-internal-isystem', '-internal-externc-isystem']
     include_paths = []
@@ -397,13 +404,13 @@ def get_diag_info(diag):
 def main():
 
     compile_commands_file = sys.argv[1]
-    cpp_file = sys.argv[2]
+    cpp_file = os.path.abspath(sys.argv[2])
     namespaces_prefix = sys.argv[3].split(',')
     namespaces_prefix.sort(key =lambda x: -len(x))
-    print(namespaces_prefix)
 
     compilationDB = CompilationDatabase.fromDirectory(
         os.path.dirname(compile_commands_file))
+    print(compilationDB)
     compilation_arguments = [str(i) for i in compilationDB.getCompileCommands(cpp_file)[0].arguments]
     # print(compilation_arguments)
     # tu = get_tu(cpp_file, compilationDB)
