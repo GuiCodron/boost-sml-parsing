@@ -4,7 +4,7 @@ project(SMLParsingTests)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../sml/include ${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(sml/include ${CMAKE_CURRENT_SOURCE_DIR})
 
 file(GLOB test_files "./*.cpp")
 

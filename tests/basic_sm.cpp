@@ -48,8 +48,8 @@ struct s1 {                             // Top level SM
       , S_s0 + on_entry<_> / []{}       // Lambda on entry
       , S_s0 + event<e2> = S_none       // Transition on event
       , S_s0 + event<e1> [g1{}] / a1{}  // Action on event with guard
-      , S_none [g1{}] / a2{}            // Anonimous guard + action
-      , S_none [g2{}] = S_s0              // Anonimous guard + action
+      , S_none [g1{}] / a2{}            // Anonymous guard + action
+      , S_none [g2{}] = S_s0            // Anonymous guard + transition
     );
   }
 };
