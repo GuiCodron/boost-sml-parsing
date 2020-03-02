@@ -22,38 +22,14 @@ def get_tu(filename, compdb):
 
 def get_include_dirs(filename, compdb):
     raw_cmds = compdb.getCompileCommands(filename)
-    cmds = [raw_cmds[i] for i in len(raw_cmds)]
-    print(cmds)
-    cmd_out = subprocess.check_output(cmds + ['-Wp,-v', '-x', 'c++', '-fsyntax-only', '-o', '/dev/null'])
-    print(cmd_out)
+    if len(raw_cmds) == 0:
+        return
+    cmds = list(raw_cmds[0].arguments)
+    cmd_out = subprocess.check_output(cmds + ['-Wp,-v', '-x', 'c++', '-fsyntax-only', '-o', '/dev/null'], stderr=subprocess.STDOUT)
+    cmd_out = cmd_out.decode('utf-8').split('\n')
 
-    return
-    include_opts = ['-I', '-isystem',
-                    '-internal-isystem', '-internal-externc-isystem']
-    include_paths = []
-
-    next_is_include = False
-    include_cmds = []
-    for i in range(len(cmds)):
-        for arg in cmds[i].arguments:
-            if not next_is_include:
-                if arg in include_opts:
-                    next_is_include = True
-                    include_cmds+=[arg]
-                    continue
-                for opt in include_opts:
-                    if arg.startswith(opt):
-                        start = len(opt)
-                        if start > 2:
-                            start += 1
-                        include_paths.append(arg[start:])
-                        include_cmds+=[arg]
-                        break
-                continue
-            include_cmds+=[arg]
-            include_paths.append(arg)
-            next_is_include = False
-    return include_cmds
+    includes = ["-I" + line[1:] for line in cmd_out if line.startswith(' ')]
+    return includes
 
 
 def get_all_includes(filename, compdb):
@@ -136,27 +112,15 @@ def rec_search(node, s_fun, files=[], max_depth=None, depth=0, transition_tables
     return transition_tables
 
 
-def rec_spelling(node, d=None):
-    if d is None:
-        d = {}
+def node_spelling(node):
     if node.kind == CursorKind.UNEXPOSED_EXPR:
-        for c in node.get_children():
-            rec_spelling(c, d)
+        children = list(node.get_children())
+        return node_spelling(children[0])
     elif node.kind == CursorKind.LAMBDA_EXPR:
-        d["lambda_decl"] = {}
+        "lambda_decl"
     else:
-        node_name = node.spelling
         print(node.spelling, node.displayname)
-        # while node_name in d:
-        #     node_name += " " + node.spelling
-
-        d[node_name] = [] #{"c": node, "child":[]}
-        for child in node.get_children():
-            child_dict = {}
-            d[node_name].append(child_dict)
-            rec_spelling(child, child_dict)
-
-    return d
+        return node.spelling
 
 
 
@@ -255,7 +219,6 @@ def get_guard(transition):
     if guard_node is None:
         return None
     guard_node = guard_node.c[2]
-    guard_repr = ""
 
     def parse_guard(node):
         if node.name == "operator!":
@@ -285,7 +248,6 @@ def get_action(transition):
     if action_node is None:
         return None
     action_node = action_node.c[2]
-    guard_repr = ""
 
     def parse_action(node):
         if node.name == "operator,":
@@ -352,7 +314,7 @@ def parse_transition_table(node, namespaces_prefix):
 
     transition_table_repr = ""
     for transition in transitions:
-        node = NodeRepr(rec_spelling(transition), namespaces_prefix)
+        node = NodeRepr(transition, namespaces_prefix)
 
         parsed_transition, transition_state_refs = parse_transition(node)
         if parsed_transition is not None:
@@ -363,12 +325,13 @@ def parse_transition_table(node, namespaces_prefix):
 
 class NodeRepr():
     def __init__(self, source_node, namespaces_prefix):
-        name, childs = next(iter(source_node.items()))
+        self.name = node_spelling(source_node)
         for namespace in namespaces_prefix:
-            name = name.replace(namespace, '')
+            self.name = self.name.replace(namespace, '')
+        while source_node.kind == CursorKind.UNEXPOSED_EXPR:
+            source_node = list(source_node.get_children())[0]
         self.node = source_node
-        self.name = name
-        self.c = [NodeRepr(c, namespaces_prefix) for c in childs]
+        self.c = [NodeRepr(c, namespaces_prefix) for c in source_node.get_children()]
 
     def __repr__(self):
         return {self.name: self.c}.__repr__()
@@ -393,14 +356,6 @@ def sm_search(node):
     return len(rec_search(node, transition_search, [], transition_tables=[])) != 0
 
 
-
-def get_diag_info(diag):
-    return { 'severity' : diag.severity,
-             'location' : diag.location,
-             'spelling' : diag.spelling,
-             'ranges' : diag.ranges,
-             'fixits' : diag.fixits }
-
 def main():
 
     compile_commands_file = sys.argv[1]
@@ -410,17 +365,16 @@ def main():
 
     compilationDB = CompilationDatabase.fromDirectory(
         os.path.dirname(compile_commands_file))
-    print(compilationDB)
-    compilation_arguments = [str(i) for i in compilationDB.getCompileCommands(cpp_file)[0].arguments]
-    # print(compilation_arguments)
-    # tu = get_tu(cpp_file, compilationDB)
+
     index = clang.cindex.Index.create()
 
-    # print(compilation_arguments)
-    # print(get_include_dirs(cpp_file, compilationDB))
-    tu = index.parse(cpp_file, get_include_dirs(cpp_file, compilationDB))
+    includes = get_include_dirs(cpp_file, compilationDB)
+    pprint(includes)
+
+    tu = index.parse(cpp_file, includes)
     for diag in tu.diagnostics:
         print(get_diag_info(diag))
+
     pprint(('diags', map(get_diag_info, tu.diagnostics)))
     sm_bases = []
     rec_search(tu.cursor, sm_search, [], transition_tables=sm_bases)
